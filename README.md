@@ -34,13 +34,34 @@ self-evolving-agent start --config my_config.yaml
 ### 常用命令
 
 ```bash
-self-evolving-agent start      # 启动Agent
-self-evolving-agent stop       # 停止运行中的Agent
-self-evolving-agent status     # 查询运行状态
-self-evolving-agent health     # 健康检查
-self-evolving-agent log        # 查看最近日志
-self-evolving-agent dashboard  # 启动Dashboard
-self-evolving-agent version    # 显示版本
+self-evolving-agent init        # 交互式生成配置文件
+self-evolving-agent doctor      # 环境诊断
+self-evolving-agent config show # 查看生效配置
+self-evolving-agent start       # 启动Agent
+self-evolving-agent stop        # 停止运行中的Agent
+self-evolving-agent status      # 查询运行状态
+self-evolving-agent health      # 健康检查
+self-evolving-agent log         # 查看最近日志
+self-evolving-agent dashboard   # 启动Dashboard
+self-evolving-agent completion  # 生成Shell补全脚本
+self-evolving-agent version     # 显示版本
+```
+
+### 首次使用工作流
+
+```bash
+# 1. 环境诊断
+self-evolving-agent doctor
+
+# 2. 生成配置（交互式或非交互式）
+self-evolving-agent init
+# 或: self-evolving-agent init --non-interactive
+
+# 3. 验证配置
+self-evolving-agent start --dry-run
+
+# 4. 启动Agent
+self-evolving-agent start
 ```
 
 ### 健康检查
@@ -49,21 +70,40 @@ self-evolving-agent version    # 显示版本
 self-evolving-agent health --env dev
 ```
 
+### 启用Shell补全
+
+```bash
+# bash
+self-evolving-agent completion --shell bash --output ~/.agent_completion.sh
+echo 'source ~/.agent_completion.sh' >> ~/.bashrc
+
+# zsh
+self-evolving-agent completion --shell zsh --output ~/.agent_completion.zsh
+echo 'source ~/.agent_completion.zsh' >> ~/.zshrc
+
+# fish
+self-evolving-agent completion --shell fish --output ~/.config/fish/completions/agent.fish
+```
+
 ## CLI 用法
 
 ```
-usage: agent [-h] [--version] {start,stop,status,health,dashboard,log,version} ...
+usage: agent [-h] [--version] {start,stop,status,health,dashboard,log,init,doctor,completion,config,version} ...
 
 Self-Evolving Agent - 自驱永续进化智能体
 
 命令:
-  start       启动Agent
-  stop        停止运行中的Agent
-  status      查询Agent运行状态
-  health      健康检查
-  dashboard   启动独立Dashboard服务
-  log         查看最近日志
-  version     显示版本信息
+  init         交互式生成配置文件
+  doctor       环境诊断 — 检查Python/依赖/配置/端口
+  config       配置管理 — show/template
+  start        启动Agent
+  stop         停止运行中的Agent
+  status       查询Agent运行状态
+  health       健康检查
+  log          查看最近日志
+  dashboard    启动独立Dashboard服务
+  completion   生成Shell补全脚本
+  version      显示版本信息
 
 选项:
   -h, --help     显示帮助信息
@@ -79,6 +119,28 @@ Self-Evolving Agent - 自驱永续进化智能体
 --online-interval SECONDS    在线循环间隔(秒)
 --offline-interval SECONDS   离线循环间隔(秒)
 --dry-run                    仅验证配置不启动Agent
+```
+
+### init 选项
+
+```
+--env {dev,prod,test}        环境名，决定输出文件名 (默认: dev)
+--output PATH                输出文件路径 (覆盖默认 config/{env}.yaml)
+--non-interactive            非交互模式，使用默认值或命令行参数
+--force                      覆盖已存在的配置文件
+--log-level LEVEL            日志级别 (非交互模式使用)
+--online-interval SECONDS    在线循环间隔秒数 (非交互模式使用)
+--offline-interval SECONDS   离线循环间隔秒数 (非交互模式使用)
+--memory-capacity N          记忆容量 (非交互模式使用)
+--exploration-rate RATE      探索率 0.0-1.0 (非交互模式使用)
+```
+
+### config 子命令
+
+```
+agent config show            # 显示当前生效配置及来源
+agent config template        # 生成全量带注释配置模板
+agent config template --output my.yaml  # 输出到文件
 ```
 
 ## 配置
