@@ -40,10 +40,35 @@ _COLOR_GREEN = "\033[32m"
 _COLOR_YELLOW = "\033[33m"
 _COLOR_BLUE = "\033[34m"
 _COLOR_CYAN = "\033[36m"
+_COLOR_MAGENTA = "\033[35m"
 _COLOR_BOLD = "\033[1m"
+_COLOR_DIM = "\033[2m"
+
+# 图标体系（Unicode符号，TTY环境使用，非TTY回退到文本）
+_ICONS = {
+    "success": "✓",
+    "error": "✗",
+    "warning": "⚠",
+    "info": "ℹ",
+    "arrow": "→",
+    "bullet": "•",
+    "check": "✔",
+    "cross": "✘",
+    "star": "★",
+    "gear": "⚙",
+    "rocket": "🚀",
+    "package": "📦",
+    "search": "🔍",
+    "wrench": "🔧",
+    "clock": "⏱",
+    "chart": "📊",
+}
 
 # 是否启用颜色（检测TTY）
 _COLOR_ENABLED = sys.stdout.isatty() if hasattr(sys.stdout, "isatty") else False
+
+# 是否启用图标（与颜色同步，非TTY回退文本）
+_ICON_ENABLED = _COLOR_ENABLED
 
 
 def _colorize(text: str, color: str) -> str:
@@ -53,24 +78,174 @@ def _colorize(text: str, color: str) -> str:
     return f"{color}{text}{_COLOR_RESET}"
 
 
+def _icon(name: str) -> str:
+    """获取图标（非TTY环境回退到文本标签）。"""
+    if not _ICON_ENABLED:
+        text_fallback = {
+            "success": "[OK]",
+            "error": "[ERROR]",
+            "warning": "[WARN]",
+            "info": "[INFO]",
+            "arrow": "->",
+            "bullet": "*",
+            "check": "[v]",
+            "cross": "[x]",
+            "star": "*",
+            "gear": "[*]",
+            "rocket": "[>]",
+            "package": "[#]",
+            "search": "[?]",
+            "wrench": "[!]",
+            "clock": "[time]",
+            "chart": "[chart]",
+        }
+        return text_fallback.get(name, "")
+    return _ICONS.get(name, "")
+
+
 def _print_success(msg: str) -> None:
     """打印成功信息。"""
-    print(f"{_colorize('[OK]', _COLOR_GREEN)} {msg}")
+    icon = _icon("success")
+    if _ICON_ENABLED:
+        print(f"{_colorize(icon, _COLOR_GREEN)} {msg}")
+    else:
+        print(f"{_colorize('[OK]', _COLOR_GREEN)} {msg}")
 
 
 def _print_error(msg: str) -> None:
     """打印错误信息。"""
-    print(f"{_colorize('[ERROR]', _COLOR_RED)} {msg}", file=sys.stderr)
+    icon = _icon("error")
+    if _ICON_ENABLED:
+        print(f"{_colorize(icon, _COLOR_RED)} {msg}", file=sys.stderr)
+    else:
+        print(f"{_colorize('[ERROR]', _COLOR_RED)} {msg}", file=sys.stderr)
 
 
 def _print_warning(msg: str) -> None:
     """打印警告信息。"""
-    print(f"{_colorize('[WARN]', _COLOR_YELLOW)} {msg}")
+    icon = _icon("warning")
+    if _ICON_ENABLED:
+        print(f"{_colorize(icon, _COLOR_YELLOW)} {msg}")
+    else:
+        print(f"{_colorize('[WARN]', _COLOR_YELLOW)} {msg}")
 
 
 def _print_info(msg: str) -> None:
     """打印信息。"""
-    print(f"{_colorize('[INFO]', _COLOR_BLUE)} {msg}")
+    icon = _icon("info")
+    if _ICON_ENABLED:
+        print(f"{_colorize(icon, _COLOR_BLUE)} {msg}")
+    else:
+        print(f"{_colorize('[INFO]', _COLOR_BLUE)} {msg}")
+
+
+def _print_header(title: str, subtitle: str = "") -> None:
+    """打印带分隔线的标题。
+
+    第一性原理：视觉层级——标题用分隔线与内容区隔，
+    让用户一眼识别输出结构的边界。
+    """
+    print()
+    print(_colorize(f"  {title}", _COLOR_BOLD + _COLOR_CYAN))
+    if subtitle:
+        print(_colorize(f"  {subtitle}", _COLOR_DIM))
+    print(_colorize("  " + "─" * 50, _COLOR_DIM))
+
+
+def _print_section(title: str) -> None:
+    """打印小节标题。"""
+    print()
+    print(_colorize(f"  {title}", _COLOR_BOLD))
+
+
+def _print_kv(key: str, value: Any, indent: int = 4) -> None:
+    """打印键值对（对齐显示）。"""
+    prefix = " " * indent
+    key_str = f"{key:<24}"
+    print(f"{prefix}{_colorize(key_str, _COLOR_DIM)} {_colorize(str(value), _COLOR_BOLD)}")
+
+
+def _print_divider() -> None:
+    """打印分隔线。"""
+    print(_colorize("  " + "─" * 50, _COLOR_DIM))
+
+
+def _print_panel(title: str, lines: List[str], color: str = _COLOR_CYAN) -> None:
+    """打印面板（带边框的内容块）。
+
+    第一性原理：视觉聚焦——用边框将重要信息（如错误详情、
+    修复建议）包围，引导用户注意力。
+    """
+    width = max(len(title), max(len(l) for l in lines) if lines else 0) + 4
+    print()
+    print(_colorize(f"  ┌{'─' * (width - 2)}┐", color))
+    print(_colorize(f"  │ {title:<{width-4}} │", color + _COLOR_BOLD))
+    print(_colorize(f"  ├{'─' * (width - 2)}┤", color))
+    for line in lines:
+        print(_colorize(f"  │ {line:<{width-4}} │", color))
+    print(_colorize(f"  └{'─' * (width - 2)}┘", color))
+
+
+def _print_table(headers: List[str], rows: List[List[str]], indent: int = 2) -> None:
+    """打印对齐表格。
+
+    第一性原理：信息密度——表格将相关数据按行列组织，
+    让用户能快速扫描和对比，比逐行列表更高效。
+
+    Args:
+        headers: 列标题列表。
+        rows: 数据行列表（每行是字符串列表）。
+        indent: 左缩进空格数。
+    """
+    if not headers:
+        return
+
+    prefix = " " * indent
+
+    # 计算每列宽度（考虑表头和数据）
+    col_widths = []
+    for i, h in enumerate(headers):
+        max_data = max((len(row[i]) for row in rows if i < len(row)), default=0)
+        col_widths.append(max(len(h), max_data))
+
+    # 打印表头
+    header_line = "  ".join(
+        _colorize(f"{h:<{col_widths[i]}}", _COLOR_BOLD)
+        for i, h in enumerate(headers)
+    )
+    print(f"{prefix}{header_line}")
+
+    # 打印分隔线
+    sep_line = "  ".join("─" * col_widths[i] for i in range(len(headers)))
+    print(f"{prefix}{_colorize(sep_line, _COLOR_DIM)}")
+
+    # 打印数据行
+    for row in rows:
+        cells = []
+        for i in range(len(headers)):
+            val = row[i] if i < len(row) else ""
+            cells.append(f"{val:<{col_widths[i]}}")
+        print(f"{prefix}{'  '.join(cells)}")
+
+
+def _print_status_table(items: List[tuple]) -> None:
+    """打印状态表格（名称/状态/详情三列）。
+
+    专门用于doctor等检查类命令，状态列带颜色图标。
+    """
+    headers = ["Check", "Status", "Detail"]
+    rows = []
+    for name, status, detail in items:
+        if status == "ok":
+            status_str = _colorize(f"{_icon('success')} OK", _COLOR_GREEN)
+        elif status == "fail":
+            status_str = _colorize(f"{_icon('error')} FAIL", _COLOR_RED)
+        elif status == "warn":
+            status_str = _colorize(f"{_icon('warning')} WARN", _COLOR_YELLOW)
+        else:
+            status_str = status
+        rows.append([name, status_str, detail])
+    _print_table(headers, rows)
 
 
 def _load_config(env: str, config_path: Optional[str]) -> Dict[str, Any]:
@@ -548,10 +723,15 @@ async def _cmd_dashboard(args: argparse.Namespace) -> int:
 async def _cmd_version(args: argparse.Namespace) -> int:
     """显示版本信息。"""
     from agent_core import __version__
-    print(_colorize("Self-Evolving Agent", _COLOR_BOLD))
-    print(f"  Version: {__version__}")
-    print(f"  Python:  {sys.version.split()[0]}")
-    print(f"  Path:    {os.path.dirname(os.path.dirname(os.path.abspath(__file__)))}")
+    _print_header(
+        f"{_icon('rocket')} Self-Evolving Agent",
+        f"自驱永续进化智能体 v{__version__}",
+    )
+    _print_kv("Version", __version__)
+    _print_kv("Python", sys.version.split()[0])
+    _print_kv("Path", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    _print_kv("Status", _colorize("Ready", _COLOR_GREEN))
+    print()
     return 0
 
 
@@ -1240,37 +1420,33 @@ async def _cmd_config(args: argparse.Namespace) -> int:
 
 def _config_show(args: argparse.Namespace) -> int:
     """显示当前生效配置及来源。"""
-    print(_colorize("=== Effective Configuration ===", _COLOR_BOLD))
-    print()
+    _print_header(
+        f"{_icon('gear')} Effective Configuration",
+        f"Environment: {args.env}",
+    )
 
-    # 显示配置来源
+    # 显示配置来源（表格化）
+    _print_section("Configuration Sources")
     config_dir = os.environ.get(
         "AGENT_CONFIG_DIR",
         os.path.join(os.getcwd(), "config"),
     )
-    print(_colorize("Configuration Sources:", _COLOR_BOLD))
 
-    sources = []
+    source_items = []
     if args.config:
-        sources.append(("CLI --config", args.config, os.path.exists(args.config)))
+        source_items.append(("CLI --config", "ok" if os.path.exists(args.config) else "fail", args.config))
     else:
         base_path = os.path.join(config_dir, "base.yaml")
-        sources.append(("base.yaml", base_path, os.path.exists(base_path)))
+        source_items.append(("base.yaml", "ok" if os.path.exists(base_path) else "warn", base_path))
         env_path = os.path.join(config_dir, f"{args.env}.yaml")
-        sources.append((f"{args.env}.yaml", env_path, os.path.exists(env_path)))
-        sources.append(("built-in defaults", "(internal)", True))
+        source_items.append((f"{args.env}.yaml", "ok" if os.path.exists(env_path) else "warn", env_path))
+        source_items.append(("built-in defaults", "ok", "(internal)"))
+    _print_status_table(source_items)
 
-    for name, path, exists in sources:
-        status = _colorize("[OK]", _COLOR_GREEN) if exists else _colorize("[MISSING]", _COLOR_RED)
-        print(f"  {status} {name:<20} {path}")
-
-    print()
-
-    # 加载并显示生效配置
+    # 加载并显示生效配置（表格化）
     config = _load_config(args.env, args.config)
-    print(_colorize("Effective Values:", _COLOR_BOLD))
+    _print_section("Effective Values")
 
-    # 按类别分组显示
     categories = [
         ("Basic", ["app_name", "app_version", "log_level"]),
         ("Loop", ["online_interval_seconds", "offline_interval_seconds"]),
@@ -1288,14 +1464,18 @@ def _config_show(args: argparse.Namespace) -> int:
     ]
 
     for cat_name, keys in categories:
-        print(f"  {_colorize(f'[{cat_name}]', _COLOR_CYAN)}")
+        rows = []
         for key in keys:
             if key in config:
                 val = config[key]
                 if isinstance(val, dict):
-                    print(f"    {key:<30} {val}")
+                    val_str = ", ".join(f"{k}={v}" for k, v in val.items())
                 else:
-                    print(f"    {key:<30} {val}")
+                    val_str = str(val)
+                rows.append([key, val_str])
+        if rows:
+            print(f"  {_colorize(f'[{cat_name}]', _COLOR_CYAN)}")
+            _print_table(["Key", "Value"], rows, indent=4)
 
     print()
     _print_info("Use 'agent config template' to see all options with descriptions.")
@@ -1449,6 +1629,94 @@ batch_query_limit: 1000                # 范围: 10-100000
 """
 
 
+async def _cmd_prefs(args: argparse.Namespace) -> int:
+    """用户偏好管理：show/set/reset。
+
+    第一性原理：可控性——记忆用户选择。
+    用户设置的偏好持久化到 ~/.agent_prefs.json，下次自动应用。
+    """
+    action = args.prefs_action or "show"
+
+    if action == "show":
+        return _prefs_show(args)
+    elif action == "set":
+        return _prefs_set(args)
+    elif action == "reset":
+        return _prefs_reset(args)
+    else:
+        _print_error(f"Unknown prefs action: {action}")
+        return 1
+
+
+def _prefs_show(args: argparse.Namespace) -> int:
+    """显示当前用户偏好。"""
+    prefs = _load_prefs()
+    _print_header(
+        f"{_icon('gear')} User Preferences",
+        f"File: {_PREFS_FILE}",
+    )
+
+    rows = []
+    for key, val in prefs.items():
+        rows.append([key, str(val)])
+    _print_table(["Key", "Value"], rows)
+
+    print()
+    _print_info("Use 'agent prefs set <key> <value>' to change")
+    _print_info("Use 'agent prefs reset' to restore defaults")
+    return 0
+
+
+def _prefs_set(args: argparse.Namespace) -> int:
+    """设置用户偏好。"""
+    prefs = _load_prefs()
+    key = args.key
+    value = args.value
+
+    # 类型转换
+    if key in ("default_port",):
+        try:
+            value = int(value)
+        except ValueError:
+            _print_error(f"Invalid value for {key}: must be integer")
+            return 1
+
+    # 验证可选值
+    if key == "color" and value not in ("auto", "always", "never"):
+        _print_error(f"Invalid color value: {value} (must be auto/always/never)")
+        return 1
+    if key == "output_format" and value not in ("text", "json"):
+        _print_error(f"Invalid output_format: {value} (must be text/json)")
+        return 1
+    if key == "default_env" and value not in ("dev", "prod", "test"):
+        _print_error(f"Invalid default_env: {value} (must be dev/prod/test)")
+        return 1
+
+    old_value = prefs.get(key, "(not set)")
+    prefs[key] = value
+
+    if _save_prefs(prefs):
+        _print_success(f"Preference updated: {key}")
+        _print_kv("Old", old_value)
+        _print_kv("New", value)
+        _print_info(f"Saved to {_PREFS_FILE}")
+        return 0
+    else:
+        _print_error(f"Failed to save preferences to {_PREFS_FILE}")
+        return 1
+
+
+def _prefs_reset(args: argparse.Namespace) -> int:
+    """重置用户偏好为默认值。"""
+    if _save_prefs(dict(_DEFAULT_PREFS)):
+        _print_success("Preferences reset to defaults")
+        _print_info(f"File: {_PREFS_FILE}")
+        return 0
+    else:
+        _print_error("Failed to reset preferences")
+        return 1
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """构建CLI参数解析器。"""
     parser = argparse.ArgumentParser(
@@ -1483,7 +1751,22 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # start 子命令
     start_parser = subparsers.add_parser(
-        "start", help="启动Agent"
+        "start", help="启动Agent",
+        description="启动Self-Evolving Agent，进入感知-决策-行动循环。",
+        epilog="""
+示例:
+  agent start                          # 使用默认配置启动
+  agent start --env prod               # 使用生产环境配置
+  agent start --config my.yaml         # 使用指定配置文件
+  agent start --dry-run                # 仅验证配置不启动
+  agent start --log-level DEBUG        # 启动时覆盖日志级别
+
+相关命令:
+  agent stop     # 停止Agent
+  agent status   # 查看运行状态
+  agent init     # 生成配置文件
+""".strip(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     start_parser.add_argument(
         "--env", default=_DEFAULT_ENV,
@@ -1513,7 +1796,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # stop 子命令
     stop_parser = subparsers.add_parser(
-        "stop", help="停止运行中的Agent"
+        "stop", help="停止运行中的Agent",
+        description="停止正在运行的Agent，优先通过Dashboard API，回退到进程查找。",
+        epilog="""
+示例:
+  agent stop                  # 停止默认端口的Agent
+  agent stop --port 9090      # 停止指定端口的Agent
+
+相关命令:
+  agent start   # 启动Agent
+  agent status  # 查看运行状态
+""".strip(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     stop_parser.add_argument(
         "--port", type=int, default=_DEFAULT_DASHBOARD_PORT,
@@ -1522,7 +1816,25 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # status 子命令
     status_parser = subparsers.add_parser(
-        "status", help="查询Agent运行状态"
+        "status", help="查询Agent运行状态",
+        description="查询Agent运行状态，包括运行时长、循环计数、任务进度等。",
+        epilog="""
+示例:
+  agent status                  # 查询默认端口的状态
+  agent status --port 9090      # 查询指定端口的状态
+
+输出包含:
+  - Status       运行状态 (running/stopped)
+  - Uptime       运行时长
+  - Cycle Count  循环计数
+  - Throughput   吞吐率 (cycles/sec)
+  - Tasks        任务进度 (带进度条)
+
+相关命令:
+  agent start  # 启动Agent
+  agent log    # 查看日志
+""".strip(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     status_parser.add_argument(
         "--port", type=int, default=_DEFAULT_DASHBOARD_PORT,
@@ -1531,7 +1843,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # health 子命令
     health_parser = subparsers.add_parser(
-        "health", help="健康检查"
+        "health", help="健康检查",
+        description="运行健康检查，验证Agent各子系统状态。",
+        epilog="""
+示例:
+  agent health                  # 使用默认环境检查
+  agent health --env prod       # 检查生产环境
+  agent health --config my.yaml # 使用指定配置检查
+
+相关命令:
+  agent doctor  # 环境诊断
+  agent status  # 运行状态
+""".strip(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     health_parser.add_argument(
         "--env", default=_DEFAULT_ENV,
@@ -1558,7 +1882,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # log 子命令
     log_parser = subparsers.add_parser(
-        "log", help="查看最近日志"
+        "log", help="查看最近日志",
+        description="查看Agent最近的日志输出。",
+        epilog="""
+示例:
+  agent log                  # 查看最近20行日志
+  agent log --lines 50       # 查看最近50行
+  agent log --lines 100      # 查看最近100行
+
+相关命令:
+  agent status  # 运行状态
+  agent start   # 启动Agent（生成日志）
+""".strip(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     log_parser.add_argument(
         "--lines", type=int, default=20,
@@ -1567,7 +1903,22 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # init 子命令
     init_parser = subparsers.add_parser(
-        "init", help="交互式生成配置文件"
+        "init", help="交互式生成配置文件",
+        description="交互式生成配置文件，支持问答模式和非交互模式。",
+        epilog="""
+示例:
+  agent init                              # 交互式生成 dev 配置
+  agent init --env prod                   # 生成 prod 配置
+  agent init --non-interactive            # 非交互模式（使用默认值）
+  agent init --non-interactive --env prod # 非交互生成 prod 配置
+  agent init --force                      # 覆盖已存在的配置
+
+相关命令:
+  agent start --dry-run  # 验证生成的配置
+  agent config show      # 查看生效配置
+  agent config template  # 生成全量模板
+""".strip(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     init_parser.add_argument(
         "--env", default=_DEFAULT_ENV,
@@ -1608,7 +1959,27 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # doctor 子命令
     doctor_parser = subparsers.add_parser(
-        "doctor", help="环境诊断 — 检查Python/依赖/配置/端口"
+        "doctor", help="环境诊断 — 检查Python/依赖/配置/端口",
+        description="系统性诊断环境：Python版本、依赖、核心模块、配置、数据目录、端口。",
+        epilog="""
+检查项 (6类):
+  1. Python Runtime      Python版本检查
+  2. Dependencies        numpy/pyyaml/psutil
+  3. Core Modules        agent_core核心模块导入
+  4. Configuration       配置文件存在性
+  5. Data Directories    数据目录可写性
+  6. Network Ports       Dashboard端口可用性
+
+示例:
+  agent doctor                        # 诊断默认环境
+  agent doctor --env prod             # 诊断生产环境配置
+  agent doctor --dashboard-port 9090  # 检查指定端口
+
+相关命令:
+  agent init    # 生成配置文件
+  agent health  # Agent健康检查
+""".strip(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     doctor_parser.add_argument(
         "--env", default=_DEFAULT_ENV,
@@ -1660,6 +2031,22 @@ def _build_parser() -> argparse.ArgumentParser:
         "--output", default=None,
         help="输出文件路径 (不指定则输出到stdout)"
     )
+
+    # prefs 子命令组
+    prefs_parser = subparsers.add_parser(
+        "prefs", help="用户偏好管理 — show/set/reset"
+    )
+    prefs_sub = prefs_parser.add_subparsers(
+        dest="prefs_action", help="偏好操作"
+    )
+    # prefs show
+    prefs_sub.add_parser("show", help="显示当前偏好")
+    # prefs set
+    prefs_set = prefs_sub.add_parser("set", help="设置偏好项")
+    prefs_set.add_argument("key", help="偏好键 (default_env/output_format/color/default_port)")
+    prefs_set.add_argument("value", help="偏好值")
+    # prefs reset
+    prefs_sub.add_parser("reset", help="重置为默认偏好")
 
     return parser
 
@@ -1716,6 +2103,177 @@ def _print_interactive_help() -> None:
     print()
 
 
+def _print_elapsed(elapsed: float) -> None:
+    """打印命令执行耗时。
+
+    第一性原理：可感知性——操作反馈。
+    让用户感知操作效率，快速操作（<100ms）不显示，避免噪音。
+    """
+    # 快速操作不显示耗时（避免噪音）
+    if elapsed < 0.1:
+        return
+    # 格式化耗时
+    if elapsed < 1.0:
+        time_str = f"{elapsed*1000:.0f}ms"
+    elif elapsed < 60:
+        time_str = f"{elapsed:.2f}s"
+    else:
+        time_str = _format_duration(elapsed)
+    print(_colorize(f"  {_icon('clock')} {time_str}", _COLOR_DIM))
+
+
+# 用户偏好文件路径
+_PREFS_FILE = os.path.expanduser("~/.agent_prefs.json")
+
+# 默认偏好
+_DEFAULT_PREFS = {
+    "default_env": "dev",
+    "output_format": "text",  # text | json
+    "color": "auto",  # auto | always | never
+    "default_port": 8080,
+}
+
+
+def _load_prefs() -> Dict[str, Any]:
+    """加载用户偏好。
+
+    第一性原理：可控性——记忆用户选择。
+    用户设置的偏好持久化到 ~/.agent_prefs.json，下次自动应用。
+    """
+    if not os.path.exists(_PREFS_FILE):
+        return dict(_DEFAULT_PREFS)
+    try:
+        with open(_PREFS_FILE, "r", encoding="utf-8") as f:
+            prefs = json.load(f)
+        # 合并默认值（确保新字段有默认值）
+        merged = dict(_DEFAULT_PREFS)
+        merged.update(prefs)
+        return merged
+    except (OSError, json.JSONDecodeError):
+        return dict(_DEFAULT_PREFS)
+
+
+def _save_prefs(prefs: Dict[str, Any]) -> bool:
+    """保存用户偏好。"""
+    try:
+        with open(_PREFS_FILE, "w", encoding="utf-8") as f:
+            json.dump(prefs, f, indent=2, ensure_ascii=False)
+        return True
+    except OSError:
+        return False
+
+
+def _print_error_recovery(exc: Exception, command: str = "") -> None:
+    """打印错误恢复引导：错误详情+修复建议+修复命令。
+
+    第一性原理：可恢复性——错误→修复闭环。
+    用户遇到错误时最需要的是"下一步做什么"，而非仅知道"出了什么错"。
+    基于错误类型和消息匹配常见问题，提供具体修复命令。
+    """
+    error_msg = str(exc)
+    error_type = type(exc).__name__
+
+    # 错误→修复建议映射表
+    recovery_map = [
+        # 导入错误
+        {
+            "patterns": ["No module named", "ModuleNotFoundError"],
+            "diagnosis": "缺少Python依赖包",
+            "fixes": [
+                "pip install -e .  # 安装项目及依赖",
+                "pip install numpy pyyaml psutil  # 安装核心依赖",
+            ],
+        },
+        # 配置文件错误
+        {
+            "patterns": ["config", "yaml", "YAMLError", "ScannerError"],
+            "diagnosis": "配置文件问题",
+            "fixes": [
+                "agent doctor  # 诊断配置",
+                "agent init --force  # 重新生成配置",
+                "agent start --dry-run  # 验证配置",
+            ],
+        },
+        # 端口占用
+        {
+            "patterns": ["Address already in use", "port", "bind"],
+            "diagnosis": "端口被占用",
+            "fixes": [
+                "agent stop  # 停止可能正在运行的Agent",
+                "agent start --port 9090  # 使用其他端口",
+                "lsof -i :8080  # 查看占用端口的进程",
+            ],
+        },
+        # 权限错误
+        {
+            "patterns": ["Permission denied", "PermissionError", "access"],
+            "diagnosis": "权限不足",
+            "fixes": [
+                f"chmod -R +w data/  # 确保数据目录可写",
+                "检查当前用户对项目目录的写权限",
+            ],
+        },
+        # 文件未找到
+        {
+            "patterns": ["No such file", "FileNotFoundError", "not found"],
+            "diagnosis": "文件不存在",
+            "fixes": [
+                "agent doctor  # 诊断环境",
+                "agent init  # 生成缺失的配置文件",
+            ],
+        },
+        # 连接错误
+        {
+            "patterns": ["Connection refused", "URLError", "timeout"],
+            "diagnosis": "连接失败（Agent可能未运行）",
+            "fixes": [
+                "agent start  # 启动Agent",
+                "agent status  # 检查运行状态",
+            ],
+        },
+    ]
+
+    # 匹配错误
+    matched = None
+    for entry in recovery_map:
+        for pattern in entry["patterns"]:
+            if pattern.lower() in error_msg.lower() or pattern.lower() in error_type.lower():
+                matched = entry
+                break
+        if matched:
+            break
+
+    # 打印错误面板
+    error_lines = [f"Error: {error_msg}"]
+    if command:
+        error_lines.insert(0, f"Command: agent {command}")
+    error_lines.append(f"Type: {error_type}")
+
+    _print_panel(
+        f"{_icon('error')} Error Occurred",
+        error_lines,
+        color=_COLOR_RED,
+    )
+
+    # 打印恢复建议
+    if matched:
+        print()
+        _print_section(f"{_icon('wrench')} Recovery Suggestions")
+        _print_kv("Diagnosis", matched["diagnosis"])
+        print()
+        for i, fix in enumerate(matched["fixes"], 1):
+            print(f"    {_colorize(f'{i}.', _COLOR_CYAN)} {_colorize(fix, _COLOR_BOLD)}")
+    else:
+        # 通用建议
+        print()
+        _print_section(f"{_icon('wrench')} General Recovery")
+        print(f"    {_colorize('1.', _COLOR_CYAN)} {_colorize('agent doctor', _COLOR_BOLD)}  # 环境诊断")
+        print(f"    {_colorize('2.', _COLOR_CYAN)} {_colorize('agent start --dry-run', _COLOR_BOLD)}  # 验证配置")
+        print(f"    {_colorize('3.', _COLOR_CYAN)} 查看日志: agent log --lines 50")
+
+    print()
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """
     CLI主入口。
@@ -1750,6 +2308,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "doctor": _cmd_doctor,
         "completion": _cmd_completion,
         "config": _cmd_config,
+        "prefs": _cmd_prefs,
     }
 
     handler = handlers.get(args.command)
@@ -1757,13 +2316,28 @@ def main(argv: Optional[List[str]] = None) -> int:
         _print_error(f"Unknown command: {args.command}")
         return 1
 
+    # 记录开始时间（用于耗时显示）
+    cmd_start_time = time.time()
+
     try:
-        return asyncio.run(handler(args))
+        result = asyncio.run(handler(args))
+        # 显示命令耗时（start/dashboard等长运行命令除外）
+        if args.command not in ("start", "dashboard"):
+            elapsed = time.time() - cmd_start_time
+            _print_elapsed(elapsed)
+        return result
     except KeyboardInterrupt:
-        _print_info("\nInterrupted")
+        print()
+        _print_warning("Operation cancelled by user (Ctrl+C)")
+        elapsed = time.time() - cmd_start_time
+        _print_elapsed(elapsed)
         return 130
+    except SystemExit:
+        raise
     except Exception as exc:
-        _print_error(f"Unexpected error: {exc}")
+        _print_error_recovery(exc, command=args.command or "")
+        elapsed = time.time() - cmd_start_time
+        _print_elapsed(elapsed)
         return 1
 
 

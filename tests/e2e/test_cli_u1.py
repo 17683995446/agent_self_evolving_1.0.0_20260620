@@ -234,7 +234,9 @@ class TestVersionCommand(unittest.TestCase):
         with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             main(["version"])
         output = mock_stdout.getvalue()
-        self.assertIn("Python:", output)
+        # 新格式使用键值对：Python <version>
+        self.assertIn("Python", output)
+        self.assertIn("3.", output)
 
 
 class TestStatusCommand(unittest.TestCase):
