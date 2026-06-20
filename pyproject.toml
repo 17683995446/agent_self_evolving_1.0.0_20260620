@@ -13,6 +13,7 @@ authors = [{ name = "SelfEvolvingAgent" }]
 dependencies = [
     "numpy>=1.24.0",
     "psutil>=5.9.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -22,16 +23,10 @@ dev = [
 ]
 
 [project.scripts]
-self-evolving-agent = "main:main"
+self-evolving-agent = "agent_core.cli:main"
 
-[tool.setuptools]
-packages = [
-    "core", "communication", "config", "deployment",
-    "drive", "execution", "explainability", "language",
-    "learning", "memory", "optimizer", "perception",
-    "planning", "prediction", "reasoning", "safety", "task",
-    "tests",
-]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "."]

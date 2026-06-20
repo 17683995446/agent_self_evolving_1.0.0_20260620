@@ -241,13 +241,15 @@ class TestStatusCommand(unittest.TestCase):
     """status命令测试。"""
 
     def test_status_no_agent_running(self):
-        """无Agent运行时友好报错。"""
-        with patch("sys.stderr", new_callable=io.StringIO) as mock_stderr:
+        """无Agent运行时友好提示并显示日志。"""
+        with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             result = main(["status", "--port", "19999"])
         self.assertEqual(result, 1)
-        output = mock_stderr.getvalue()
-        self.assertIn("Cannot connect", output)
+        output = mock_stdout.getvalue()
+        # 新行为：友好提示Agent未运行，显示端口号和启动建议
+        self.assertIn("not running", output)
         self.assertIn("19999", output)
+        self.assertIn("agent start", output)
 
 
 class TestDashboardCommand(unittest.TestCase):

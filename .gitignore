@@ -1,6 +1,5 @@
 # Python
 __pycache__/
-*.py[cod]
 *$py.class
 *.so
 .Python
@@ -8,6 +7,10 @@ __pycache__/
 dist/
 build/
 .eggs/
+
+# Sourceless .pyc: 部分模块原始 .py 丢失，仅存编译缓存
+# 这些 .pyc 文件需要纳入版本控制以确保项目可克隆运行
+# （__pycache__/ 中的 .pyc 仍被忽略，只有源目录中的 .pyc 被跟踪）
 
 # Virtual environments
 venv/
@@ -49,3 +52,8 @@ data/
 # Patches and temp status
 *.patch
 long_run_status.json
+
+# Test artifacts
+agent_memory.db
+message_bus.db
+*.db-journal

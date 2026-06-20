@@ -9,7 +9,7 @@
 - 子命令模式：每个行为一个明确命令，降低认知负荷
 
 设计要点：
-- argparse子命令：start/stop/status/health/dashboard/version
+- argparse子命令：start/stop/status/health/dashboard/log/version
 - 零配置可启动：无参数时使用合理默认值
 - 信号处理：Ctrl+C优雅关闭
 - 友好输出：彩色状态、进度提示
@@ -135,6 +135,8 @@ def _load_config(env: str, config_path: Optional[str]) -> Dict[str, Any]:
         for err in errors:
             _print_error(f"  {err}")
         _print_error("Fix the above errors or use --config to specify a valid config file")
+        _print_info("Hint: Use 'agent start --dry-run' to check config without starting")
+        _print_info("Hint: Use 'agent start' without --config for zero-config defaults")
 
     return config
 
@@ -188,6 +190,19 @@ async def _cmd_start(args: argparse.Namespace) -> int:
         config["online_interval_seconds"] = args.online_interval
     if args.offline_interval:
         config["offline_interval_seconds"] = args.offline_interval
+
+    # --dry-run：仅验证配置不启动
+    if args.dry_run:
+        print(_colorize("=== Configuration Check ===", _COLOR_BOLD))
+        print(f"  Environment:        {args.env}")
+        print(f"  Log Level:          {config.get('log_level', 'INFO')}")
+        print(f"  Online Interval:    {config.get('online_interval_seconds', 1.0)}s")
+        print(f"  Offline Interval:   {config.get('offline_interval_seconds', 3600.0)}s")
+        print(f"  Memory Capacity:    {config.get('memory_capacity', 10000)}")
+        print(f"  Exploration Rate:   {config.get('exploration_rate', 0.3)}")
+        _print_success("Configuration is valid. Agent is ready to start.")
+        _print_info("Run without --dry-run to actually start the Agent.")
+        return 0
 
     _print_info(
         f"Starting Agent (env={args.env}, "
@@ -250,7 +265,7 @@ async def _cmd_start(args: argparse.Namespace) -> int:
 
 
 async def _cmd_status(args: argparse.Namespace) -> int:
-    """查询Agent状态（通过Dashboard API）。"""
+    """查询Agent状态（通过Dashboard API或日志文件）。"""
     import urllib.request
     import urllib.error
 
@@ -259,10 +274,30 @@ async def _cmd_status(args: argparse.Namespace) -> int:
         with urllib.request.urlopen(url, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.URLError:
-        _print_error(
-            f"Cannot connect to dashboard at port {args.port}. "
-            f"Is the Agent running?"
+        # Dashboard不可用 — 离线模式
+        _print_warning(
+            f"Agent is not running (dashboard at port {args.port} not reachable)"
         )
+        _print_info("Recent log entries:")
+
+        # 尝试读取最近的日志文件
+        log_dir = os.path.join(os.getcwd(), "data", "logs")
+        log_file = os.path.join(log_dir, "selfevolvingagent.log")
+        if os.path.exists(log_file):
+            try:
+                with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+                # 显示最后10行
+                recent = lines[-10:] if len(lines) > 10 else lines
+                for line in recent:
+                    print(f"  {line.rstrip()}")
+                _print_info(f"(showing last {len(recent)} lines from {log_file})")
+            except OSError as exc:
+                _print_error(f"Failed to read log file: {exc}")
+        else:
+            _print_info("No log file found. Start the Agent with 'agent start'.")
+
+        _print_info("To start the Agent: agent start")
         return 1
     except Exception as exc:
         _print_error(f"Status query failed: {exc}")
@@ -290,6 +325,63 @@ async def _cmd_status(args: argparse.Namespace) -> int:
         print(f"  Current Task: {task}")
 
     return 0
+
+
+async def _cmd_stop(args: argparse.Namespace) -> int:
+    """停止运行中的Agent。
+
+    优先通过Dashboard API发送停止请求；
+    若Dashboard不可用，回退到查找并终止Agent进程。
+    """
+    import urllib.request
+    import urllib.error
+    import subprocess
+
+    # 方式1：通过Dashboard API停止
+    url = f"http://127.0.0.1:{args.port}/api/stop"
+    try:
+        req = urllib.request.Request(url, method="POST")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if resp.status == 200:
+                _print_success("Agent stop request sent via Dashboard API")
+                return 0
+    except urllib.error.URLError:
+        pass  # Dashboard不可用，回退到进程查找
+    except Exception:
+        pass  # 其他API错误，回退到进程查找
+
+    # 方式2：查找并终止Agent进程
+    _print_info("Dashboard not reachable, trying to find Agent process...")
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "agent_core"],
+            capture_output=True, text=True, timeout=5,
+        )
+        pids = result.stdout.strip().split()
+        if not pids:
+            _print_warning("No running Agent process found")
+            return 0
+
+        for pid_str in pids:
+            pid = int(pid_str)
+            if pid == os.getpid():
+                continue  # 不终止自己
+            try:
+                os.kill(pid, signal.SIGTERM)
+                _print_info(f"Sent SIGTERM to PID {pid}")
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                _print_error(f"Permission denied to stop PID {pid}")
+
+        _print_success("Agent stop signal sent")
+        return 0
+    except FileNotFoundError:
+        _print_error("pgrep not available. Use 'kill <pid>' manually.")
+        return 1
+    except Exception as exc:
+        _print_error(f"Failed to stop Agent: {exc}")
+        return 1
 
 
 async def _cmd_health(args: argparse.Namespace) -> int:
@@ -361,6 +453,35 @@ async def _cmd_version(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_log(args: argparse.Namespace) -> int:
+    """查看最近日志。"""
+    log_dir = os.path.join(os.getcwd(), "data", "logs")
+    log_file = os.path.join(log_dir, "selfevolvingagent.log")
+
+    if not os.path.exists(log_file):
+        _print_warning("No log file found.")
+        _print_info("Start the Agent with 'agent start' to generate logs.")
+        return 1
+
+    try:
+        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError as exc:
+        _print_error(f"Failed to read log file: {exc}")
+        return 1
+
+    n = args.lines
+    recent = lines[-n:] if len(lines) > n else lines
+
+    print(_colorize(f"=== Last {len(recent)} log lines ===", _COLOR_BOLD))
+    print(f"  (from {log_file})")
+    print()
+    for line in recent:
+        print(line.rstrip())
+
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """构建CLI参数解析器。"""
     parser = argparse.ArgumentParser(
@@ -372,11 +493,20 @@ def _build_parser() -> argparse.ArgumentParser:
   agent start                    # 使用默认配置启动
   agent start --env prod         # 使用生产环境配置启动
   agent start --config my.yaml   # 使用指定配置启动
+  agent start --dry-run          # 仅验证配置不启动
+  agent stop                     # 停止运行中的Agent
   agent status                   # 查询运行状态
   agent health                   # 健康检查
+  agent log --lines 50           # 查看最近50行日志
   agent dashboard --port 9090    # 启动Dashboard
   agent version                  # 显示版本
 """,
+    )
+
+    # --version / -V 全局标志
+    parser.add_argument(
+        "--version", "-V", action="store_true",
+        help="显示版本信息并退出",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="可用命令")
@@ -405,6 +535,19 @@ def _build_parser() -> argparse.ArgumentParser:
     start_parser.add_argument(
         "--offline-interval", type=float, default=None,
         help="离线循环间隔(秒)"
+    )
+    start_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="仅验证配置不启动Agent"
+    )
+
+    # stop 子命令
+    stop_parser = subparsers.add_parser(
+        "stop", help="停止运行中的Agent"
+    )
+    stop_parser.add_argument(
+        "--port", type=int, default=_DEFAULT_DASHBOARD_PORT,
+        help=f"Dashboard端口 (默认: {_DEFAULT_DASHBOARD_PORT})"
     )
 
     # status 子命令
@@ -443,6 +586,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "version", help="显示版本信息"
     )
 
+    # log 子命令
+    log_parser = subparsers.add_parser(
+        "log", help="查看最近日志"
+    )
+    log_parser.add_argument(
+        "--lines", type=int, default=20,
+        help="显示行数 (默认: 20)"
+    )
+
     return parser
 
 
@@ -459,6 +611,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    # --version 全局标志
+    if args.version:
+        return asyncio.run(_cmd_version(args))
+
     if args.command is None:
         parser.print_help()
         return 0
@@ -466,10 +622,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     # 分发到子命令
     handlers = {
         "start": _cmd_start,
+        "stop": _cmd_stop,
         "status": _cmd_status,
         "health": _cmd_health,
         "dashboard": _cmd_dashboard,
         "version": _cmd_version,
+        "log": _cmd_log,
     }
 
     handler = handlers.get(args.command)

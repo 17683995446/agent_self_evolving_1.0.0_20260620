@@ -36,6 +36,25 @@ from optimizer import OfflineOptimizer
 from optimizer.evolution_dynamics import EvolutionDynamics
 from optimizer.evolution_roadmap import EvolutionRoadmap
 
+# 易用性阶段4：集成ErrorAdvisor，提供友好错误诊断
+try:
+    from agent_core.common.error_advisor import ErrorAdvisor
+    _error_advisor = ErrorAdvisor()
+except ImportError:
+    _error_advisor = None
+
+
+def _format_error(exc: Exception, context: str = "") -> str:
+    """格式化错误信息为友好输出（集成ErrorAdvisor）。
+
+    第一性原理：错误信息的价值在于"可操作性"——告诉用户做什么，
+    而非仅描述发生了什么。
+    """
+    if _error_advisor is not None:
+        brief = _error_advisor.format_error_brief(exc, color=False)
+        return f"{context}: {brief}" if context else brief
+    return f"{context}: {exc}" if context else str(exc)
+
 
 class SelfEvolvingAgent:
     """
@@ -304,12 +323,12 @@ class SelfEvolvingAgent:
                 self.goal_loop.load(self._goal_state_path)
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"Failed to load goal state: {e}")
+                self.logger.warning(_format_error(e, "Failed to load goal state"))
         try:
             self.skill_library._load_from_disk()
         except Exception as e:
             if self.logger:
-                self.logger.warning(f"Failed to load skills: {e}")
+                self.logger.warning(_format_error(e, "Failed to load skills"))
 
     def start(self) -> None:
         """启动Agent"""
@@ -337,7 +356,7 @@ class SelfEvolvingAgent:
         try:
             self._main_loop()
         except Exception as e:
-            self.logger.error(f"Main loop error: {e}")
+            self.logger.error(_format_error(e, "Main loop error"))
         finally:
             self.stop()
     
@@ -365,7 +384,7 @@ class SelfEvolvingAgent:
             try:
                 self._step()
             except Exception as e:
-                self.logger.error(f"Step error: {e}")
+                self.logger.error(_format_error(e, "Step error"))
             
             self.step_count += 1
             
@@ -534,7 +553,7 @@ class SelfEvolvingAgent:
             self.collaborator.broadcast_heartbeat(load_score=load_score)
             self._collaboration_step_counter += 1
         except Exception as e:
-            self.logger.debug(f"Collaboration step skipped: {e}")
+            self.logger.debug(_format_error(e, "Collaboration step skipped"))
         
         # 发布系统状态事件
         self.event_bus.publish(SystemEvent(
@@ -1137,7 +1156,7 @@ class SelfEvolvingAgent:
             self.step_count += 1
             return self.get_status()
         except Exception as e:
-            return {"error": str(e)}
+            return {"error": _format_error(e, "step failed")}
 
     def _record_evolution_snapshot(self, current_mse: float) -> None:
         """记录进化快照"""
@@ -1170,7 +1189,7 @@ class SelfEvolvingAgent:
                 total_experiences=len(self.replay_buffer),
             )
         except Exception as e:
-            self.logger.error(f"Failed to record evolution snapshot: {e}")
+            self.logger.error(_format_error(e, "Failed to record evolution snapshot"))
 
     def get_status(self) -> Dict[str, Any]:
         """获取Agent状态"""
