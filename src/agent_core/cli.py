@@ -103,6 +103,18 @@ def _icon(name: str) -> str:
     return _ICONS.get(name, "")
 
 
+# 哨兵值：表示配置键缺失（区别于 None 这种合法值）
+_MISSING = object()
+
+# 命令别名（模块级，供 main() 和 _history_replay 共用）
+_COMMAND_ALIASES = {
+    "s": "start", "st": "start", "sp": "stop",
+    "stat": "status", "h": "health", "v": "version",
+    "l": "log", "i": "init", "d": "doctor",
+    "c": "config", "p": "prefs", "comp": "completion",
+}
+
+
 def _print_success(msg: str) -> None:
     """打印成功信息。"""
     icon = _icon("success")
@@ -480,15 +492,20 @@ async def _cmd_start(args: argparse.Namespace) -> int:
 
 async def _cmd_status(args: argparse.Namespace) -> int:
     """查询Agent状态（通过Dashboard API或日志文件）。"""
-    import urllib.request
-    import urllib.error
+    # watch 模式：循环刷新
+    if getattr(args, "watch", False):
+        return _status_watch(args)
 
-    url = f"http://127.0.0.1:{args.port}/api/status"
-    try:
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.URLError:
+    data, err = _fetch_status(args.port)
+    if err is not None:
         # Dashboard不可用 — 离线模式
+        if _is_json_mode(args):
+            _output_json({
+                "status": "stopped",
+                "port": args.port,
+                "message": "Agent is not running",
+            })
+            return 1
         _print_warning(
             f"Agent is not running (dashboard at port {args.port} not reachable)"
         )
@@ -513,11 +530,38 @@ async def _cmd_status(args: argparse.Namespace) -> int:
 
         _print_info("To start the Agent: agent start")
         return 1
-    except Exception as exc:
-        _print_error(f"Status query failed: {exc}")
-        return 1
 
-    # 格式化输出
+    # JSON模式：直接输出API返回的数据
+    if _is_json_mode(args):
+        _output_json(data)
+        return 0
+
+    _render_status(data)
+    return 0
+
+
+def _fetch_status(port: int) -> tuple:
+    """获取Agent状态数据。
+
+    Returns:
+        (data, error) 元组。成功时 error 为 None，失败时 data 为 None。
+    """
+    import urllib.request
+    import urllib.error
+
+    url = f"http://127.0.0.1:{port}/api/status"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return data, None
+    except urllib.error.URLError as exc:
+        return None, exc
+    except Exception as exc:
+        return None, exc
+
+
+def _render_status(data: Dict[str, Any]) -> None:
+    """渲染Agent状态（人类可读模式）。"""
     print(_colorize("=== Agent Status ===", _COLOR_BOLD))
     status = data.get("status", "unknown")
     status_color = _COLOR_GREEN if status == "running" else _COLOR_YELLOW
@@ -582,6 +626,69 @@ async def _cmd_status(args: argparse.Namespace) -> int:
     if task:
         print(f"  Current Task: {task}")
 
+
+def _status_watch(args: argparse.Namespace) -> int:
+    """watch模式：循环刷新状态，类似 top / kubectl get -w。
+
+    第一性原理：可观测性——用户需要持续监控Agent运行状态，
+    而非反复手动执行 `agent status`。自动刷新让"盯着看"成为可能。
+    """
+    # JSON 模式不支持 watch（watch 是交互式功能）
+    if _is_json_mode(args):
+        _print_error("--json cannot be combined with --watch (use without --watch for one-shot JSON)")
+        return 1
+    # 非TTY环境无法 watch（无法清屏，也无意义）
+    if not sys.stdout.isatty():
+        _print_error("--watch requires an interactive terminal (TTY)")
+        _print_info("Hint: run 'agent status' for one-shot output, or use 'agent status --json' in scripts.")
+        return 1
+
+    interval = getattr(args, "interval", 2)
+    if interval < 1:
+        _print_error("--interval must be >= 1 second")
+        return 1
+
+    refresh_count = 0
+    try:
+        while True:
+            # 清屏（ANSI转义：光标回原点 + 清屏）
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.flush()
+
+            refresh_count += 1
+            now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+
+            data, err = _fetch_status(args.port)
+            if err is not None:
+                _print_header(
+                    f"{_icon('chart')} Agent Status (watch)",
+                    f"Port {args.port}  |  Refresh #{refresh_count}  |  {now_str}",
+                )
+                _print_warning(
+                    f"Agent is not running (dashboard at port {args.port} not reachable)"
+                )
+                print()
+                _print_info(f"Next refresh in {interval}s...  (Ctrl+C to exit)")
+            else:
+                _print_header(
+                    f"{_icon('chart')} Agent Status (watch)",
+                    f"Port {args.port}  |  Refresh #{refresh_count}  |  {now_str}",
+                )
+                _render_status(data)
+                print()
+                _print_info(
+                    f"Refreshing every {interval}s...  (Ctrl+C to exit)"
+                )
+
+            sys.stdout.flush()
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        # 优雅退出
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
+        _print_info(f"Watch stopped after {refresh_count} refresh(es).")
+        return 0
+
     return 0
 
 
@@ -613,6 +720,14 @@ async def _cmd_stop(args: argparse.Namespace) -> int:
     import urllib.request
     import urllib.error
     import subprocess
+
+    # 危险操作确认
+    if not _confirm_action(
+        f"stop the Agent on port {args.port}",
+        args,
+        details="This will terminate the running Agent process.",
+    ):
+        return 1
 
     # 方式1：通过Dashboard API停止
     url = f"http://127.0.0.1:{args.port}/api/stop"
@@ -723,6 +838,15 @@ async def _cmd_dashboard(args: argparse.Namespace) -> int:
 async def _cmd_version(args: argparse.Namespace) -> int:
     """显示版本信息。"""
     from agent_core import __version__
+    if _is_json_mode(args):
+        _output_json({
+            "name": "self_evolving_agent",
+            "version": __version__,
+            "python": sys.version.split()[0],
+            "path": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "status": "ready",
+        })
+        return 0
     _print_header(
         f"{_icon('rocket')} Self-Evolving Agent",
         f"自驱永续进化智能体 v{__version__}",
@@ -801,6 +925,15 @@ async def _cmd_init(args: argparse.Namespace) -> int:
         _print_warning(f"Configuration file already exists: {output_path}")
         _print_info("Use --force to overwrite, or specify --output for a different path")
         return 1
+
+    # --force 覆盖确认
+    if os.path.exists(output_path) and args.force:
+        if not _confirm_action(
+            f"overwrite {output_path}",
+            args,
+            details="Existing configuration will be replaced.",
+        ):
+            return 1
 
     # 生成配置文件（带注释）
     content = _generate_config_yaml(config, env)
@@ -971,66 +1104,108 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
     用户运行报错时往往不知根因，doctor命令系统性排查常见问题，
     将"被动排错"转为"主动诊断"。
     """
+    # 收集检查结果（数据与渲染分离，支持JSON输出）
+    results = _collect_doctor_results(args)
+
+    # JSON模式：直接输出结构化数据
+    if _is_json_mode(args):
+        _output_json(results)
+        return 0 if results["failed"] == 0 else 1
+
+    # 人类可读模式
     print(_colorize("=== Self-Evolving Agent Doctor ===", _COLOR_BOLD))
     print()
 
-    checks_passed = 0
-    checks_failed = 0
-    checks_warning = 0
+    for section in results["sections"]:
+        print(_colorize(f"[{section['index']}/{results['total_sections']}] {section['name']}", _COLOR_BOLD))
+        for check in section["checks"]:
+            status = check["status"]
+            name = check["name"]
+            detail = check["detail"]
+            fix = check.get("fix", "")
+            tip = check.get("tip", "")
+            if status == "ok":
+                msg = f"  {_colorize('[OK]', _COLOR_GREEN)} {name}"
+                if detail:
+                    msg += f" — {detail}"
+                print(msg)
+            elif status == "fail":
+                print(f"  {_colorize('[FAIL]', _COLOR_RED)} {name} — {detail}")
+                if fix:
+                    print(f"          {_colorize('Fix:', _COLOR_YELLOW)} {fix}")
+            elif status == "warn":
+                print(f"  {_colorize('[WARN]', _COLOR_YELLOW)} {name} — {detail}")
+                if tip:
+                    print(f"          {_colorize('Tip:', _COLOR_CYAN)} {tip}")
+        print()
 
-    def _ok(name: str, detail: str = "") -> None:
-        nonlocal checks_passed
-        checks_passed += 1
-        msg = f"  {_colorize('[OK]', _COLOR_GREEN)} {name}"
-        if detail:
-            msg += f" — {detail}"
-        print(msg)
+    # 汇总
+    print(_colorize("=== Summary ===", _COLOR_BOLD))
+    total = results["passed"] + results["failed"] + results["warning"]
+    print(f"  Passed:  {results['passed']}/{total}")
+    print(f"  Failed:  {results['failed']}/{total}")
+    print(f"  Warning: {results['warning']}/{total}")
 
-    def _fail(name: str, detail: str, fix: str = "") -> None:
-        nonlocal checks_failed
-        checks_failed += 1
-        print(f"  {_colorize('[FAIL]', _COLOR_RED)} {name} — {detail}")
-        if fix:
-            print(f"          {_colorize('Fix:', _COLOR_YELLOW)} {fix}")
+    if results["failed"] > 0:
+        _print_error(f"{results['failed']} check(s) failed. Fix them before starting the Agent.")
+        return 1
+    elif results["warning"] > 0:
+        _print_warning(f"{results['warning']} warning(s). Agent may still run, but check them.")
+        return 0
+    else:
+        _print_success("All checks passed. Agent is ready to run!")
+        return 0
 
-    def _warn(name: str, detail: str, tip: str = "") -> None:
-        nonlocal checks_warning
-        checks_warning += 1
-        print(f"  {_colorize('[WARN]', _COLOR_YELLOW)} {name} — {detail}")
-        if tip:
-            print(f"          {_colorize('Tip:', _COLOR_CYAN)} {tip}")
+
+def _collect_doctor_results(args: argparse.Namespace) -> Dict[str, Any]:
+    """收集doctor检查结果（数据与渲染分离）。
+
+    第一性原理：关注点分离——数据收集与渲染独立，
+    支持人类可读和JSON两种输出模式。
+    """
+    sections = []
+    passed = 0
+    failed = 0
+    warning = 0
+
+    def _add_check(section: List[Dict], status: str, name: str, detail: str = "",
+                   fix: str = "", tip: str = "") -> None:
+        nonlocal passed, failed, warning
+        section.append({
+            "status": status, "name": name, "detail": detail,
+            "fix": fix, "tip": tip,
+        })
+        if status == "ok":
+            passed += 1
+        elif status == "fail":
+            failed += 1
+        elif status == "warn":
+            warning += 1
 
     # 1. Python版本检查
-    print(_colorize("[1/6] Python Runtime", _COLOR_BOLD))
+    section1 = []
     py_version = sys.version_info
     py_str = f"{py_version.major}.{py_version.minor}.{py_version.micro}"
     if py_version >= (3, 9):
-        _ok("Python version", py_str)
+        _add_check(section1, "ok", "Python version", py_str)
     else:
-        _fail("Python version", f"{py_str} (需要 >=3.9)", "升级Python到3.9+")
+        _add_check(section1, "fail", "Python version", f"{py_str} (需要 >=3.9)", "升级Python到3.9+")
+    sections.append({"index": 1, "name": "Python Runtime", "checks": section1})
 
     # 2. 依赖检查
-    print()
-    print(_colorize("[2/6] Dependencies", _COLOR_BOLD))
-    required_deps = [
-        ("numpy", "numpy"),
-        ("yaml", "pyyaml"),
-        ("psutil", "psutil"),
-    ]
+    section2 = []
+    required_deps = [("numpy", "numpy"), ("yaml", "pyyaml"), ("psutil", "psutil")]
     for import_name, pkg_name in required_deps:
         try:
             mod = __import__(import_name)
             version = getattr(mod, "__version__", "unknown")
-            _ok(f"{pkg_name}", version)
+            _add_check(section2, "ok", pkg_name, version)
         except ImportError:
-            _fail(
-                f"{pkg_name}", "not installed",
-                f"pip install {pkg_name}",
-            )
+            _add_check(section2, "fail", pkg_name, "not installed", f"pip install {pkg_name}")
+    sections.append({"index": 2, "name": "Dependencies", "checks": section2})
 
     # 3. 核心模块导入检查
-    print()
-    print(_colorize("[3/6] Core Modules", _COLOR_BOLD))
+    section3 = []
     core_modules = [
         "agent_core",
         "agent_core.cli",
@@ -1041,98 +1216,83 @@ async def _cmd_doctor(args: argparse.Namespace) -> int:
     for mod_name in core_modules:
         try:
             __import__(mod_name)
-            _ok(mod_name)
+            _add_check(section3, "ok", mod_name)
         except ImportError as exc:
-            _fail(mod_name, str(exc), "检查安装: pip install -e .")
+            _add_check(section3, "fail", mod_name, str(exc), "检查安装: pip install -e .")
         except Exception as exc:
-            _warn(mod_name, f"import error: {exc}")
+            _add_check(section3, "warn", mod_name, f"import error: {exc}")
+    sections.append({"index": 3, "name": "Core Modules", "checks": section3})
 
     # 4. 配置文件检查
-    print()
-    print(_colorize("[4/6] Configuration", _COLOR_BOLD))
+    section4 = []
     config_dir = os.environ.get(
         "AGENT_CONFIG_DIR",
         os.path.join(os.getcwd(), "config"),
     )
     if os.path.isdir(config_dir):
-        _ok("Config directory", config_dir)
-        # 检查base.yaml
+        _add_check(section4, "ok", "Config directory", config_dir)
         base_path = os.path.join(config_dir, "base.yaml")
         if os.path.exists(base_path):
-            _ok("base.yaml", "found")
+            _add_check(section4, "ok", "base.yaml", "found")
         else:
-            _warn("base.yaml", "not found", "运行 'agent init' 生成配置")
-        # 检查环境配置
+            _add_check(section4, "warn", "base.yaml", "not found", tip="运行 'agent init' 生成配置")
         env_path = os.path.join(config_dir, f"{args.env}.yaml")
         if os.path.exists(env_path):
-            _ok(f"{args.env}.yaml", "found")
+            _add_check(section4, "ok", f"{args.env}.yaml", "found")
         else:
-            _warn(f"{args.env}.yaml", "not found", f"运行 'agent init --env {args.env}'")
+            _add_check(section4, "warn", f"{args.env}.yaml", "not found",
+                       tip=f"运行 'agent init --env {args.env}'")
     else:
-        _warn("Config directory", f"{config_dir} not found", "运行 'agent init' 创建配置")
+        _add_check(section4, "warn", "Config directory", f"{config_dir} not found",
+                   tip="运行 'agent init' 创建配置")
+    sections.append({"index": 4, "name": "Configuration", "checks": section4})
 
     # 5. 数据目录权限检查
-    print()
-    print(_colorize("[5/6] Data Directories", _COLOR_BOLD))
+    section5 = []
     data_dirs = [
         ("data", os.path.join(os.getcwd(), "data")),
         ("data/logs", os.path.join(os.getcwd(), "data", "logs")),
     ]
     for name, path in data_dirs:
         if os.path.isdir(path):
-            # 检查可写
             if os.access(path, os.W_OK):
-                _ok(name, f"writable ({path})")
+                _add_check(section5, "ok", name, f"writable ({path})")
             else:
-                _fail(name, "not writable", f"chmod +w {path}")
+                _add_check(section5, "fail", name, "not writable", f"chmod +w {path}")
         else:
-            # 尝试创建
             try:
                 os.makedirs(path, exist_ok=True)
-                _ok(name, f"created ({path})")
+                _add_check(section5, "ok", name, f"created ({path})")
             except OSError as exc:
-                _warn(name, f"cannot create: {exc}", f"mkdir -p {path}")
+                _add_check(section5, "warn", name, f"cannot create: {exc}", f"mkdir -p {path}")
+    sections.append({"index": 5, "name": "Data Directories", "checks": section5})
 
     # 6. 端口可用性检查
-    print()
-    print(_colorize("[6/6] Network Ports", _COLOR_BOLD))
+    section6 = []
     import socket
-    ports_to_check = [
-        (args.dashboard_port, "Dashboard"),
-    ]
+    ports_to_check = [(args.dashboard_port, "Dashboard")]
     for port, service in ports_to_check:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(1)
         try:
             result = sock.connect_ex(("127.0.0.1", port))
             if result == 0:
-                _warn(
-                    f"Port {port} ({service})",
-                    "in use",
-                    f"Agent可能已在运行，或用 --port 指定其他端口",
-                )
+                _add_check(section6, "warn", f"Port {port} ({service})", "in use",
+                           tip="Agent可能已在运行，或用 --port 指定其他端口")
             else:
-                _ok(f"Port {port} ({service})", "available")
+                _add_check(section6, "ok", f"Port {port} ({service})", "available")
         finally:
             sock.close()
+    sections.append({"index": 6, "name": "Network Ports", "checks": section6})
 
-    # 汇总
-    print()
-    print(_colorize("=== Summary ===", _COLOR_BOLD))
-    total = checks_passed + checks_failed + checks_warning
-    print(f"  Passed:  {checks_passed}/{total}")
-    print(f"  Failed:  {checks_failed}/{total}")
-    print(f"  Warning: {checks_warning}/{total}")
-
-    if checks_failed > 0:
-        _print_error(f"{checks_failed} check(s) failed. Fix them before starting the Agent.")
-        return 1
-    elif checks_warning > 0:
-        _print_warning(f"{checks_warning} warning(s). Agent may still run, but check them.")
-        return 0
-    else:
-        _print_success("All checks passed. Agent is ready to run!")
-        return 0
+    return {
+        "passed": passed,
+        "failed": failed,
+        "warning": warning,
+        "total": passed + failed + warning,
+        "total_sections": len(sections),
+        "sections": sections,
+    }
 
 
 async def _cmd_completion(args: argparse.Namespace) -> int:
@@ -1413,6 +1573,8 @@ async def _cmd_config(args: argparse.Namespace) -> int:
         return _config_show(args)
     elif action == "template":
         return _config_template(args)
+    elif action == "diff":
+        return _config_diff(args)
     else:
         _print_error(f"Unknown config action: {action}")
         return 1
@@ -1420,6 +1582,34 @@ async def _cmd_config(args: argparse.Namespace) -> int:
 
 def _config_show(args: argparse.Namespace) -> int:
     """显示当前生效配置及来源。"""
+    # JSON模式下静默加载配置（避免 info 消息污染 JSON 输出）
+    if _is_json_mode(args):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            config = _load_config(args.env, args.config)
+    else:
+        config = _load_config(args.env, args.config)
+
+    # JSON模式：直接输出配置
+    if _is_json_mode(args):
+        config_dir = os.environ.get(
+            "AGENT_CONFIG_DIR",
+            os.path.join(os.getcwd(), "config"),
+        )
+        sources = []
+        if args.config:
+            sources.append({"name": "CLI --config", "path": args.config, "exists": os.path.exists(args.config)})
+        else:
+            base_path = os.path.join(config_dir, "base.yaml")
+            sources.append({"name": "base.yaml", "path": base_path, "exists": os.path.exists(base_path)})
+            env_path = os.path.join(config_dir, f"{args.env}.yaml")
+            sources.append({"name": f"{args.env}.yaml", "path": env_path, "exists": os.path.exists(env_path)})
+            sources.append({"name": "built-in defaults", "path": "(internal)", "exists": True})
+        _output_json({"env": args.env, "sources": sources, "config": config})
+        return 0
+
     _print_header(
         f"{_icon('gear')} Effective Configuration",
         f"Environment: {args.env}",
@@ -1443,8 +1633,7 @@ def _config_show(args: argparse.Namespace) -> int:
         source_items.append(("built-in defaults", "ok", "(internal)"))
     _print_status_table(source_items)
 
-    # 加载并显示生效配置（表格化）
-    config = _load_config(args.env, args.config)
+    # 显示生效配置（表格化）
     _print_section("Effective Values")
 
     categories = [
@@ -1499,6 +1688,146 @@ def _config_template(args: argparse.Namespace) -> int:
         print(template)
 
     return 0
+
+
+def _config_diff(args: argparse.Namespace) -> int:
+    """对比两个环境的配置差异。
+
+    第一性原理：可理解性——多环境部署时，用户需要快速看清
+    "dev 和 prod 到底差在哪"，而非逐项肉眼比对两个 YAML。
+    将差异结构化、可视化，让"配置漂移"一目了然。
+    """
+    env1 = args.env1
+    env2 = args.env2
+
+    # 静默加载两个环境的配置（不打印 "Loaded xxx config" 提示）
+    import contextlib
+    import io
+
+    def _silent_load(env: str) -> Dict[str, Any]:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cfg = _load_config(env, None)
+        return cfg
+
+    try:
+        cfg1 = _silent_load(env1)
+    except Exception as exc:
+        _print_error(f"Failed to load config for env '{env1}': {exc}")
+        return 1
+    try:
+        cfg2 = _silent_load(env2)
+    except Exception as exc:
+        _print_error(f"Failed to load config for env '{env2}': {exc}")
+        return 1
+
+    # 计算差异
+    all_keys = sorted(set(cfg1.keys()) | set(cfg2.keys()))
+    diffs: List[Dict[str, Any]] = []
+    only_env1: List[Dict[str, Any]] = []
+    only_env2: List[Dict[str, Any]] = []
+    same: List[Dict[str, Any]] = []
+
+    for key in all_keys:
+        v1 = cfg1.get(key, _MISSING)
+        v2 = cfg2.get(key, _MISSING)
+        if v1 is _MISSING:
+            only_env2.append({"key": key, "env2_value": v2})
+        elif v2 is _MISSING:
+            only_env1.append({"key": key, "env1_value": v1})
+        elif v1 != v2:
+            diffs.append({"key": key, "env1_value": v1, "env2_value": v2})
+        else:
+            same.append({"key": key, "value": v1})
+
+    # JSON 模式：结构化输出
+    if _is_json_mode(args):
+        _output_json({
+            "env1": env1,
+            "env2": env2,
+            "summary": {
+                "total_keys": len(all_keys),
+                "different": len(diffs),
+                "only_env1": len(only_env1),
+                "only_env2": len(only_env2),
+                "identical": len(same),
+            },
+            "different": diffs,
+            "only_env1": only_env1,
+            "only_env2": only_env2,
+            "identical": same,
+        })
+        return 0
+
+    # 人类可读模式
+    _print_header(
+        f"{_icon('search')} Configuration Diff",
+        f"{env1}  {_icon('arrow')}  {env2}",
+    )
+
+    # 摘要
+    _print_section("Summary")
+    summary_rows = [
+        ["Total keys", str(len(all_keys))],
+        [_colorize("Different", _COLOR_YELLOW), str(len(diffs))],
+        [_colorize(f"Only in {env1}", _COLOR_RED), str(len(only_env1))],
+        [_colorize(f"Only in {env2}", _COLOR_GREEN), str(len(only_env2))],
+        [_colorize("Identical", _COLOR_DIM), str(len(same))],
+    ]
+    _print_table(["Metric", "Count"], summary_rows)
+
+    # 差异详情
+    if diffs:
+        _print_section(f"Changed ({len(diffs)})")
+        diff_rows = []
+        for d in diffs:
+            v1_str = _format_diff_value(d["env1_value"])
+            v2_str = _format_diff_value(d["env2_value"])
+            diff_rows.append([
+                d["key"],
+                _colorize(v1_str, _COLOR_RED),
+                _colorize(v2_str, _COLOR_GREEN),
+            ])
+        _print_table(["Key", env1, env2], diff_rows)
+
+    # 仅 env1 有的键
+    if only_env1:
+        _print_section(f"Only in {env1} ({len(only_env1)})")
+        rows = [[d["key"], _format_diff_value(d["env1_value"])] for d in only_env1]
+        _print_table(["Key", "Value"], rows)
+
+    # 仅 env2 有的键
+    if only_env2:
+        _print_section(f"Only in {env2} ({len(only_env2)})")
+        rows = [[d["key"], _format_diff_value(d["env2_value"])] for d in only_env2]
+        _print_table(["Key", "Value"], rows)
+
+    # 完全一致
+    if same and not diffs and not only_env1 and not only_env2:
+        _print_section("Result")
+        _print_success(f"All {len(same)} keys are identical between '{env1}' and '{env2}'")
+    elif same:
+        print()
+        _print_info(f"{len(same)} keys are identical (hidden). Use --json to see all.")
+
+    print()
+    if diffs or only_env1 or only_env2:
+        _print_warning("Configuration drift detected between environments.")
+    else:
+        _print_success("No configuration drift detected.")
+
+    return 0
+
+
+def _format_diff_value(val: Any) -> str:
+    """格式化配置值用于差异展示。"""
+    if val is _MISSING:
+        return "-"
+    if isinstance(val, dict):
+        return ", ".join(f"{k}={v}" for k, v in val.items())
+    if isinstance(val, list):
+        return "[" + ", ".join(str(v) for v in val) + "]"
+    return str(val)
 
 
 def _generate_full_template() -> str:
@@ -1651,6 +1980,9 @@ async def _cmd_prefs(args: argparse.Namespace) -> int:
 def _prefs_show(args: argparse.Namespace) -> int:
     """显示当前用户偏好。"""
     prefs = _load_prefs()
+    if _is_json_mode(args):
+        _output_json({"prefs": prefs, "file": _PREFS_FILE})
+        return 0
     _print_header(
         f"{_icon('gear')} User Preferences",
         f"File: {_PREFS_FILE}",
@@ -1717,6 +2049,166 @@ def _prefs_reset(args: argparse.Namespace) -> int:
         return 1
 
 
+async def _cmd_history(args: argparse.Namespace) -> int:
+    """命令历史管理：show/replay/clear。
+
+    第一性原理：可观测性——操作可追溯。
+    记录用户执行的命令，支持回看和重新执行。
+    """
+    action = args.history_action or "show"
+
+    if action == "show":
+        return _history_show(args)
+    elif action == "replay":
+        return await _history_replay(args)
+    elif action == "clear":
+        return _history_clear(args)
+    else:
+        _print_error(f"Unknown history action: {action}")
+        return 1
+
+
+def _history_show(args: argparse.Namespace) -> int:
+    """显示命令历史。"""
+    history = _load_history()
+
+    if _is_json_mode(args):
+        _output_json({"history": history, "file": _HISTORY_FILE})
+        return 0
+
+    if not history:
+        _print_info("No command history yet.")
+        _print_info(f"History file: {_HISTORY_FILE}")
+        return 0
+
+    _print_header(
+        f"{_icon('clock')} Command History",
+        f"{len(history)} entries (max {_HISTORY_MAX})",
+    )
+
+    # 表格化显示
+    n = args.limit if args.limit else len(history)
+    recent = history[-n:] if n < len(history) else history
+
+    rows = []
+    for entry in recent:
+        result_icon = _colorize("✓", _COLOR_GREEN) if entry["result"] == 0 else _colorize("✗", _COLOR_RED)
+        rows.append([
+            str(entry["id"]),
+            entry["timestamp"],
+            entry["command"][:40],
+            result_icon,
+            f"{entry['duration']}s",
+        ])
+
+    _print_table(["ID", "Time", "Command", "Result", "Duration"], rows)
+
+    print()
+    _print_info("Use 'agent history replay <id>' to re-run a command")
+    _print_info("Use 'agent history clear' to clear history")
+    return 0
+
+
+async def _history_replay(args: argparse.Namespace) -> int:
+    """重新执行历史命令。
+
+    第一性原理：可恢复性——用户能重放过往命令，避免重复输入。
+    注意：不能递归调用 main()，因为 main() 内部使用 asyncio.run()，
+    而本函数已在事件循环中（由 _cmd_history → asyncio.run 调入），
+    嵌套 asyncio.run() 会报错。这里直接解析并分发到 handler。
+    """
+    import inspect
+
+    history = _load_history()
+    target_id = args.id
+
+    # 查找指定ID的命令
+    target = None
+    for entry in history:
+        if entry["id"] == target_id:
+            target = entry
+            break
+
+    if target is None:
+        _print_error(f"History entry #{target_id} not found")
+        _print_info(f"Use 'agent history show' to see available entries")
+        return 1
+
+    # 解析原始argv（排除命令名本身）
+    original_argv = target.get("argv", [])
+    if not original_argv:
+        _print_error("Cannot replay: original command not recorded")
+        return 1
+
+    _print_info(f"Replaying: agent {' '.join(original_argv)}")
+    _print_info(f"Original: {target['timestamp']} (result={target['result']})")
+    print()
+
+    # 直接解析并分发（不递归调用 main，避免 asyncio.run 嵌套）
+    parser = _build_parser()
+
+    # 别名预处理
+    if original_argv and original_argv[0] in _COMMAND_ALIASES:
+        original_argv = [_COMMAND_ALIASES[original_argv[0]]] + original_argv[1:]
+
+    # --json 预处理
+    json_requested = "--json" in original_argv
+    if json_requested:
+        original_argv = [a for a in original_argv if a != "--json"]
+
+    try:
+        replay_args = parser.parse_args(original_argv)
+    except SystemExit:
+        return 1
+
+    if replay_args.command is None:
+        return 0
+
+    # --version 全局标志
+    if getattr(replay_args, "version", False):
+        return await _cmd_version(replay_args)
+
+    replay_args.json = json_requested or getattr(replay_args, "json", False)
+    # 标记为回放，避免重复记录历史
+    replay_args._skip_history = True
+
+    handlers = {
+        "start": _cmd_start, "stop": _cmd_stop, "status": _cmd_status,
+        "health": _cmd_health, "dashboard": _cmd_dashboard, "version": _cmd_version,
+        "log": _cmd_log, "init": _cmd_init, "doctor": _cmd_doctor,
+        "completion": _cmd_completion, "config": _cmd_config,
+        "prefs": _cmd_prefs,
+    }
+
+    handler = handlers.get(replay_args.command)
+    if handler is None:
+        _print_error(f"Unknown command: {replay_args.command}")
+        return 1
+
+    # 异步 handler 直接 await，同步 handler 直接调用
+    if inspect.iscoroutinefunction(handler):
+        return await handler(replay_args)
+    else:
+        return handler(replay_args)
+
+
+def _history_clear(args: argparse.Namespace) -> int:
+    """清空命令历史。"""
+    # 危险操作确认
+    if not _confirm_action(
+        "clear all command history",
+        args,
+        details=f"This will delete all entries in {_HISTORY_FILE}",
+    ):
+        return 1
+    if _save_history([]):
+        _print_success("History cleared")
+        return 0
+    else:
+        _print_error("Failed to clear history")
+        return 1
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """构建CLI参数解析器。"""
     parser = argparse.ArgumentParser(
@@ -1745,6 +2237,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version", "-V", action="store_true",
         help="显示版本信息并退出",
+    )
+
+    # --json 全局标志：机器可读输出
+    parser.add_argument(
+        "--json", action="store_true",
+        help="以JSON格式输出（便于脚本集成）",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="可用命令")
@@ -1813,6 +2311,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--port", type=int, default=_DEFAULT_DASHBOARD_PORT,
         help=f"Dashboard端口 (默认: {_DEFAULT_DASHBOARD_PORT})"
     )
+    stop_parser.add_argument(
+        "--yes", "-y", action="store_true",
+        help="跳过确认提示"
+    )
 
     # status 子命令
     status_parser = subparsers.add_parser(
@@ -1822,6 +2324,8 @@ def _build_parser() -> argparse.ArgumentParser:
 示例:
   agent status                  # 查询默认端口的状态
   agent status --port 9090      # 查询指定端口的状态
+  agent status --watch          # 持续监控（每2秒刷新）
+  agent status --watch --interval 5  # 每5秒刷新
 
 输出包含:
   - Status       运行状态 (running/stopped)
@@ -1839,6 +2343,14 @@ def _build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument(
         "--port", type=int, default=_DEFAULT_DASHBOARD_PORT,
         help=f"Dashboard端口 (默认: {_DEFAULT_DASHBOARD_PORT})"
+    )
+    status_parser.add_argument(
+        "--watch", "-w", action="store_true",
+        help="持续监控模式，自动刷新 (类似 top)"
+    )
+    status_parser.add_argument(
+        "--interval", type=int, default=2,
+        help="watch模式刷新间隔秒数 (默认: 2)"
     )
 
     # health 子命令
@@ -1937,6 +2449,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="覆盖已存在的配置文件"
     )
     init_parser.add_argument(
+        "--yes", "-y", action="store_true",
+        help="跳过确认提示（与--force配合使用）"
+    )
+    init_parser.add_argument(
         "--log-level", default=None,
         help="日志级别 (非交互模式使用)"
     )
@@ -2006,7 +2522,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # config 子命令组
     config_parser = subparsers.add_parser(
-        "config", help="配置管理 — show/template"
+        "config", help="配置管理 — show/template/diff"
     )
     config_sub = config_parser.add_subparsers(
         dest="config_action", help="配置操作"
@@ -2031,6 +2547,25 @@ def _build_parser() -> argparse.ArgumentParser:
         "--output", default=None,
         help="输出文件路径 (不指定则输出到stdout)"
     )
+    # config diff
+    config_diff = config_sub.add_parser(
+        "diff", help="对比两个环境的配置差异",
+        description="对比两个环境（如 dev 和 prod）的配置差异，"
+                    "可视化展示哪些配置项不同，帮助发现配置漂移。",
+        epilog="""
+示例:
+  agent config diff dev prod       # 对比 dev 和 prod 配置
+  agent config diff dev test       # 对比 dev 和 test 配置
+  agent config diff dev prod --json # JSON格式输出
+
+相关命令:
+  agent config show      # 查看单个环境生效配置
+  agent config template  # 生成全量配置模板
+""".strip(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    config_diff.add_argument("env1", help="第一个环境名 (如 dev)")
+    config_diff.add_argument("env2", help="第二个环境名 (如 prod)")
 
     # prefs 子命令组
     prefs_parser = subparsers.add_parser(
@@ -2047,6 +2582,29 @@ def _build_parser() -> argparse.ArgumentParser:
     prefs_set.add_argument("value", help="偏好值")
     # prefs reset
     prefs_sub.add_parser("reset", help="重置为默认偏好")
+
+    # history 子命令组
+    history_parser = subparsers.add_parser(
+        "history", help="命令历史 — show/replay/clear"
+    )
+    history_sub = history_parser.add_subparsers(
+        dest="history_action", help="历史操作"
+    )
+    # history show
+    history_show = history_sub.add_parser("show", help="显示命令历史")
+    history_show.add_argument(
+        "--limit", type=int, default=20,
+        help="显示最近N条 (默认: 20)"
+    )
+    # history replay
+    history_replay = history_sub.add_parser("replay", help="重新执行历史命令")
+    history_replay.add_argument("id", type=int, help="历史记录ID")
+    # history clear
+    history_clear = history_sub.add_parser("clear", help="清空命令历史")
+    history_clear.add_argument(
+        "--yes", "-y", action="store_true",
+        help="跳过确认提示"
+    )
 
     return parser
 
@@ -2100,6 +2658,16 @@ def _print_interactive_help() -> None:
     print(f"  • 使用 {_colorize('--help', _COLOR_CYAN)} 查看任何命令的详细选项")
     print(f"  • 使用 {_colorize('agent completion --shell bash', _COLOR_CYAN)} 启用Tab补全")
     print(f"  • 文档: {_colorize('docs/user/quick_start.md', _COLOR_CYAN)}")
+    print()
+    print(_colorize("Shortcuts (aliases):", _COLOR_BOLD))
+    aliases = [
+        ("s, st", "start"), ("sp", "stop"), ("stat", "status"),
+        ("h", "health"), ("v", "version"), ("l", "log"),
+        ("i", "init"), ("d", "doctor"), ("c", "config"),
+        ("p", "prefs"), ("comp", "completion"),
+    ]
+    for alias, cmd in aliases:
+        print(f"  {_colorize(f'agent {alias:<8}', _COLOR_CYAN)} = agent {cmd}")
     print()
 
 
@@ -2160,6 +2728,116 @@ def _save_prefs(prefs: Dict[str, Any]) -> bool:
             json.dump(prefs, f, indent=2, ensure_ascii=False)
         return True
     except OSError:
+        return False
+
+
+def _output_json(data: Dict[str, Any]) -> None:
+    """输出JSON格式数据。
+
+    第一性原理：可集成性——机器可读输出。
+    用户在脚本中调用agent时，需要结构化JSON输出而非人类可读文本。
+    """
+    print(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+
+
+def _is_json_mode(args: argparse.Namespace) -> bool:
+    """检查是否启用JSON输出模式。"""
+    return getattr(args, "json", False)
+
+
+# 历史记录文件路径
+_HISTORY_FILE = os.path.expanduser("~/.agent_history.json")
+_HISTORY_MAX = 100  # 最多保留100条历史
+
+
+def _load_history() -> List[Dict[str, Any]]:
+    """加载命令历史。
+
+    第一性原理：可观测性——操作可追溯。
+    记录用户执行的命令，支持回看和重新执行。
+    """
+    if not os.path.exists(_HISTORY_FILE):
+        return []
+    try:
+        with open(_HISTORY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def _save_history(history: List[Dict[str, Any]]) -> bool:
+    """保存命令历史（保留最近 _HISTORY_MAX 条）。"""
+    # 只保留最近的记录
+    if len(history) > _HISTORY_MAX:
+        history = history[-_HISTORY_MAX:]
+    try:
+        with open(_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2, ensure_ascii=False)
+        return True
+    except OSError:
+        return False
+
+
+def _record_history(argv: List[str], result: int, duration: float) -> None:
+    """记录一条命令历史。"""
+    history = _load_history()
+    entry = {
+        "id": len(history) + 1,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "command": " ".join(argv) if argv else "",
+        "argv": argv,
+        "result": result,
+        "duration": round(duration, 3),
+    }
+    history.append(entry)
+    _save_history(history)
+
+
+def _confirm_action(action_desc: str, args: argparse.Namespace, details: str = "") -> bool:
+    """交互式确认危险操作。
+
+    第一性原理：可信任性——操作前预览。
+    危险操作（stop/init --force/history clear）前要求确认，
+    --yes 标志跳过确认（便于脚本自动化）。
+
+    Args:
+        action_desc: 操作描述（如 "stop the Agent"）。
+        args: 命令参数（检查 --yes 标志）。
+        details: 额外详情（如影响范围）。
+
+    Returns:
+        True 表示用户确认，False 表示取消。
+    """
+    # --yes 标志跳过确认
+    if getattr(args, "yes", False):
+        return True
+
+    # JSON模式不交互，直接执行
+    if _is_json_mode(args):
+        return True
+
+    # 非TTY环境无法交互，直接执行
+    if not sys.stdin.isatty():
+        return True
+
+    # 显示操作预览
+    print(_colorize(f"{_icon('warning')} About to: {action_desc}", _COLOR_YELLOW))
+    if details:
+        print(f"  {_colorize(details, _COLOR_DIM)}")
+    print()
+
+    # 询问确认
+    try:
+        response = input(f"  Proceed? [{_colorize('y/N', _COLOR_BOLD)}] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        _print_info("Cancelled")
+        return False
+
+    if response in ("y", "yes"):
+        return True
+    else:
+        _print_info("Cancelled")
         return False
 
 
@@ -2285,7 +2963,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         退出码（0成功，非0失败）。
     """
     parser = _build_parser()
+
+    # 命令别名预处理：将短别名替换为完整命令名（使用模块级 _COMMAND_ALIASES）
+    # 第一性原理：可交互性——快捷输入。
+    if argv is None:
+        argv = sys.argv[1:]
+    # 只替换第一个位置参数（命令名），保留其余参数
+    if argv and argv[0] in _COMMAND_ALIASES:
+        argv = [_COMMAND_ALIASES[argv[0]]] + argv[1:]
+
+    # --json 全局标志预处理：允许 --json 出现在任意位置（如 `agent version --json`）
+    # 第一性原理：可交互性——用户自然写法是 flag 跟在子命令后。
+    # argparse 子命令模式下，主 parser 的全局 flag 必须在子命令前；
+    # 这里从 argv 任意位置提取 --json，统一前置，使两种写法都可用。
+    json_requested = False
+    if "--json" in argv:
+        json_requested = True
+        argv = [a for a in argv if a != "--json"]
+
     args = parser.parse_args(argv)
+    # 将预处理结果写回 args，供各命令的 _is_json_mode() 读取
+    args.json = json_requested or getattr(args, "json", False)
 
     # --version 全局标志
     if args.version:
@@ -2309,6 +3007,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "completion": _cmd_completion,
         "config": _cmd_config,
         "prefs": _cmd_prefs,
+        "history": _cmd_history,
     }
 
     handler = handlers.get(args.command)
@@ -2316,8 +3015,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         _print_error(f"Unknown command: {args.command}")
         return 1
 
-    # 记录开始时间（用于耗时显示）
+    # 记录开始时间（用于耗时显示和历史记录）
     cmd_start_time = time.time()
+
+    # history replay 递归调用main时不重复记录
+    _skip_history = getattr(args, "_skip_history", False)
 
     try:
         result = asyncio.run(handler(args))
@@ -2325,12 +3027,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command not in ("start", "dashboard"):
             elapsed = time.time() - cmd_start_time
             _print_elapsed(elapsed)
+        # 记录历史（排除history命令自身和replay递归调用）
+        if not _skip_history and args.command not in ("history",):
+            _record_history(argv, result, time.time() - cmd_start_time)
         return result
     except KeyboardInterrupt:
         print()
         _print_warning("Operation cancelled by user (Ctrl+C)")
         elapsed = time.time() - cmd_start_time
         _print_elapsed(elapsed)
+        if not _skip_history and args.command not in ("history",):
+            _record_history(argv, 130, elapsed)
         return 130
     except SystemExit:
         raise
@@ -2338,6 +3045,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         _print_error_recovery(exc, command=args.command or "")
         elapsed = time.time() - cmd_start_time
         _print_elapsed(elapsed)
+        if not _skip_history and args.command not in ("history",):
+            _record_history(argv, 1, elapsed)
         return 1
 
 
